@@ -2,6 +2,7 @@ import subprocess
 import time
 from pathlib import Path
 import os
+import shutil
 from dotenv import load_dotenv
 from pathlib import Path
 import json
@@ -24,20 +25,14 @@ CODEX_CMD = os.getenv("CODEX_CMD", "echo NO_CHANGES").split()
 
 MAX_ITERATIONS = int(os.getenv("MAX_ITERATIONS", 10))
 SLEEP_AFTER_PUSH_SECONDS = int(os.getenv("SLEEP_AFTER_PUSH_SECONDS", 90))
+VERCEL_TEAM_ID = os.getenv("VERCEL_TEAM_ID", "")
 
 # =========================
 # HELPER FUNCTIONS
 # =========================
 
+import json  # you can keep this import if already there, it's harmless
 
-def get_current_commit_hash(short=True) -> str:
-    """Return the current HEAD commit hash (short or full)."""
-    if short:
-        cmd = ["git", "rev-parse", "--short=7", "HEAD"]
-    else:
-        cmd = ["git", "rev-parse", "HEAD"]
-    stdout, _, _ = run(cmd, cwd=REPO_PATH, check=True)
-    return stdout.strip()
 
 def git_workdir_has_changes() -> bool:
     """
@@ -61,73 +56,7 @@ def git_workdir_has_changes() -> bool:
     return result.returncode != 0
 
 
-def get_deployment_id_for_current_commit() -> str | None:
-    """
-    Find the Vercel deployment whose commit hash matches the current HEAD.
-
-    Strategy:
-    - Get HEAD short hash (e.g. '3cc8afc')
-    - Call `vercel list --prod --json --limit 20`
-    - Look for that hash in deployment metadata
-    - Return deployment ID/uid if found
-    """
-    commit_short = get_current_commit_hash(short=True)
-    print(f"[info] Looking for deployment of commit {commit_short}...")
-
-    env = os.environ.copy()
-    if VERCEL_TOKEN:
-        env["VERCEL_AUTH_TOKEN"] = VERCEL_TOKEN
-    if VERCEL_TEAM_ID:
-        env["VERCEL_TEAM_ID"] = VERCEL_TEAM_ID
-
-    cmd = ["vercel", "list", "--prod", "--json", "--limit", "20"]
-    stdout, stderr, rc = run(cmd, cwd=REPO_PATH, check=False, env=env)
-
-    if rc != 0 or not stdout.strip():
-        print("[warn] `vercel list` failed or returned no data.")
-        if stderr.strip():
-            print("[vercel list stderr]")
-            print(stderr)
-        return None
-
-    try:
-        deployments = json.loads(stdout)
-    except json.JSONDecodeError:
-        print("[warn] Failed to parse `vercel list` JSON, cannot map commit → deployment.")
-        return None
-
-    # Some versions return {"deployments":[...]} instead of a raw list
-    if isinstance(deployments, dict) and "deployments" in deployments:
-        deployments = deployments["deployments"]
-
-    # 1st pass: look in known meta fields
-    for dep in deployments:
-        meta = dep.get("meta", {}) or {}
-        candidate_shas = [
-            meta.get("githubCommitSha"),
-            meta.get("gitlabCommitSha"),
-            meta.get("bitbucketCommitSha"),
-            meta.get("commit"),
-        ]
-        for sha in candidate_shas:
-            if isinstance(sha, str) and sha.startswith(commit_short):
-                dep_id = dep.get("uid") or dep.get("id") or dep.get("deploymentId")
-                print(f"[info] Matched commit {commit_short} to deployment {dep_id}")
-                return dep_id
-
-    # 2nd pass: brute-force search in the whole JSON object as string
-    for dep in deployments:
-        dep_str = json.dumps(dep)
-        if commit_short in dep_str:
-            dep_id = dep.get("uid") or dep.get("id") or dep.get("deploymentId")
-            print(f"[info] Fuzzy match commit {commit_short} → deployment {dep_id}")
-            return dep_id
-
-    print(f"[warn] No deployment found for commit {commit_short}.")
-    return None
-
-
-def run(cmd, cwd=None, input_text=None, check=True):
+def run(cmd, cwd=None, input_text=None, check=True, env=None):
     """
     Run a shell command and return stdout as text.
     Raises RuntimeError on non-zero exit code if check=True.
@@ -138,6 +67,7 @@ def run(cmd, cwd=None, input_text=None, check=True):
         input=input_text,
         text=True,
         capture_output=True,
+        env=env,
     )
     if check and result.returncode != 0:
         raise RuntimeError(
@@ -168,17 +98,109 @@ def fetch_latest_build_logs() -> str:
     cmd = ["vercel", "inspect", dep_id, "--logs", "--wait"]
 
     stdout, stderr, _ = run(cmd, cwd=REPO_PATH, check=False, env=env)
-    if not stdout.strip():
+    logs = stdout if stdout.strip() else stderr
+    if not logs.strip():
         print("[warn] No logs returned from Vercel for this deployment.")
-        if stderr.strip():
-            print("[vercel inspect stderr]")
-            print(stderr)
         return ""
 
     print("[info] Log snippet:")
-    print("\n".join(stdout.splitlines()[-15:]))
-    return stdout
+    print("\n".join(logs.splitlines()[-15:]))
+    return logs
 
+
+def get_current_commit_hash(short: bool = True) -> str:
+    """Return the current HEAD commit hash (short or full)."""
+    if short:
+        cmd = ["git", "rev-parse", "--short=7", "HEAD"]
+    else:
+        cmd = ["git", "rev-parse", "HEAD"]
+    stdout, _, _ = run(cmd, cwd=REPO_PATH, check=True)
+    return stdout.strip()
+
+
+def get_deployment_id_for_current_commit() -> str | None:
+    """
+    Find the Vercel deployment whose commit hash matches the current HEAD.
+
+    Works with older Vercel CLI (no --json, no --limit):
+
+    - Run `vercel list` in the linked project dir (uses .vercel/project.json).
+    - Parse deployment IDs from the first column of the table.
+    - For each ID, run `vercel inspect <id>` and search for the short commit hash.
+    """
+
+    commit_short = get_current_commit_hash(short=True)
+    print(f"[info] Looking for deployment of commit {commit_short}...")
+
+    env = os.environ.copy()
+    if VERCEL_TOKEN:
+        env["VERCEL_AUTH_TOKEN"] = VERCEL_TOKEN
+    if VERCEL_TEAM_ID:
+        env["VERCEL_TEAM_ID"] = VERCEL_TEAM_ID
+
+    # 1) Get deployments in plain-text table form
+    cmd = ["vercel", "list"]  # no --json, no --limit
+    stdout, stderr, rc = run(cmd, cwd=REPO_PATH, check=False, env=env)
+
+    if rc != 0 or not stdout.strip():
+        print("[warn] `vercel list` failed or returned no data.")
+        if stderr.strip():
+            print("[vercel list stderr]")
+            print(stderr)
+        return None
+
+    # 2) Parse deployment IDs / URLs from each non-header line.
+    # Newer Vercel CLI prints the deployment URL as the first column (no raw IDs).
+    dep_ids: list[str] = []
+    for line in stdout.splitlines():
+        raw = line.rstrip()
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("Vercel CLI"):
+            continue
+        # Skip obvious headers / separators
+        lower = stripped.lower()
+        if lower.startswith("age ") or lower.startswith("deployment") or lower.startswith("id "):
+            continue
+        if set(stripped) <= {"─", "━", " ", "┌", "└", "┼", "│", "┐", "┘"}:
+            continue
+
+        parts = stripped.split()
+        if not parts:
+            continue
+
+        dep_id = parts[0]
+        is_url = ".vercel.app" in dep_id or dep_id.startswith("https://")
+        is_raw_id = (
+            dep_id.startswith("dpl_")
+            or (dep_id.isalnum() and len(dep_id) >= 8 and any(ch.isdigit() for ch in dep_id))
+        )
+        if is_url or is_raw_id:
+            dep_ids.append(dep_id)
+
+    if not dep_ids:
+        print("[warn] Could not parse any deployment IDs from `vercel list`.")
+        return None
+
+    print(f"[info] Parsed {len(dep_ids)} deployment candidates from `vercel list`.")
+
+    # 3) For each candidate deployment, inspect it (with logs) and look for the commit hash
+    for dep_id in dep_ids:
+        print(f"[debug] Inspecting deployment {dep_id} for commit {commit_short}...")
+        insp_out, insp_err, _ = run(
+            ["vercel", "inspect", dep_id, "--logs"],
+            cwd=REPO_PATH,
+            check=False,
+            env=env,
+        )
+        combined = f"{insp_out}\n{insp_err}"
+        if commit_short in combined:
+            print(f"[info] Matched commit {commit_short} to deployment {dep_id}")
+            return dep_id
+
+    print(f"[warn] No deployment found for commit {commit_short} in {len(dep_ids)} candidates.")
+    return None
 
 def build_looks_successful(logs: str) -> bool:
     """
@@ -216,18 +238,42 @@ def run_codex_on_logs(logs: str) -> bool:
     You *must* adapt this to however your local Codex tool behaves.
     """
     print("\n[step] Running Codex with latest build logs...")
-    stdout, stderr, returncode = run(
-        CODEX_CMD,
-        cwd=REPO_PATH,
-        input_text=logs,
-        check=False,  # we handle non-zero ourselves
-    )
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+
+    def run_once(cmd: list[str], label: str):
+        print(f"[debug] Running Codex command ({label}): {' '.join(cmd)}")
+        return run(
+            cmd,
+            cwd=REPO_PATH,
+            input_text=logs,
+            check=False,  # we handle non-zero ourselves
+            env=env,
+        )
+
+    stdout, stderr, returncode = run_once(CODEX_CMD, "plain")
 
     print("[codex stdout]")
     print(stdout)
     if stderr.strip():
         print("\n[codex stderr]")
         print(stderr)
+
+    combined = (stdout + stderr).lower()
+    if returncode != 0 and "stdin is not a terminal" in combined:
+        if shutil.which("script"):
+            print("[info] Codex requires a TTY; retrying via `script` to provide a pseudo-tty...")
+            wrapped_cmd = ["script", "-q", "/dev/null"] + CODEX_CMD
+            stdout, stderr, returncode = run_once(wrapped_cmd, "pty")
+            print("[codex stdout]")
+            print(stdout)
+            if stderr.strip():
+                print("\n[codex stderr]")
+                print(stderr)
+            combined = (stdout + stderr).lower()
+        else:
+            print("[warn] Codex requires a TTY but `script` is not available. Skipping Codex run.")
+            return False
 
     # Example convention: Codex prints "NO_CHANGES" if everything is fine
     if "NO_CHANGES" in stdout.upper():
