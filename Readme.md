@@ -1,21 +1,4 @@
-Great question — the README you pasted is good in content, but it’s currently confusing because:
-	•	it mixes old Python wording with the new TypeScript implementation
-	•	it doesn’t clearly explain the exact command to run
-	•	it doesn’t explain what branch is pushed and why refspec errors won’t happen
-	•	it doesn’t clearly describe the real workflow step-by-step from CLI → Vercel → Codex → Git
-
-Below is a cleaned, corrected, and clarified README that matches exactly how your current vercel_codex_loop.ts works, including:
-	•	CODEX_USE_EXEC=1
-	•	npx ts-node …
-	•	active branch behavior
-	•	commit-centric deployment matching
-	•	no refspec errors
-
-You can replace your README.md with this version.
-
-⸻
-
-📦 vercel-codex-autofix
+ 📦 vercel-codex-autofix
 
 An autonomous self-healing deployment loop for Vercel projects.
 
@@ -58,7 +41,7 @@ Stops when:
 ⸻
 
 🏗 Architecture Overview
-
+```txt
 ┌────────────────┐
 │ Git Commit     │
 └───────┬────────┘
@@ -79,7 +62,7 @@ Stops when:
 [5] Vercel redeploys
         ▼
 [6] Loop until success
-
+```
 
 ⸻
 
@@ -93,20 +76,20 @@ Stops when:
 ⸻
 
 📥 Installation
-
+```bash
 git clone https://github.com/yankeemarco/vercel-codex-autofix.git
 cd vercel-codex-autofix
 
 npm install
 npm install -D ts-node typescript @types/node
-
+```
 
 ⸻
 
 ⚙️ Configuration (.env)
 
 Create a .env file:
-
+```
 # --- Vercel Authentication ---
 VERCEL_TOKEN=vcpat_your_token_here
 VERCEL_TEAM_ID=
@@ -125,6 +108,7 @@ CODEX_USE_EXEC=1   # use Codex CLI (recommended)
 # --- Loop Control ---
 MAX_ITERATIONS=10
 SLEEP_AFTER_PUSH_SECONDS=90
+```
 
 🔑 Vercel token
 
@@ -169,7 +153,7 @@ vercel inspect <deployment> --logs --wait
 ⸻
 
 🧪 Example output
-
+```
 [start] Vercel ↔ Codex auto-fix loop (TypeScript)
 Repo:   /Users/jacky/Documents/zeda_video
 Branch: master
@@ -183,7 +167,7 @@ Iteration 1/10
 [info] Codex appears to have modified the repo.
 [step] Git add/commit/push...
 [info] git push completed.
-
+```
 
 ⸻
 
