@@ -53,3 +53,6 @@ dist/
 # gui logs
 logs/*
 !logs/.gitkeep
+
+# runtime output when this package controls another repo
+vercel_codex_autofix/

@@ -1,32 +1,23 @@
-# GUI intent spec for MCP Playwright
+# Auto-generated GUI intent spec for MCP Playwright
 
-**Target URL:**  
-https://zedavideo.vercel.app
+- Generated: (auto)
+- Base URL: https://zeda.video
+- Routes file: mcp/gui-routes.json
 
-## Critical flows
+## Scenarios
 
-### 1. Homepage loads
-- Open the root URL.
-- Page title should contain “Zeda”.
-- There must be no visible error banner, alert, or toast containing “error”/“failed”.
-
-### 2. Sign-in flow
-- Navigate to `/login`.
-- Enter invalid credentials (e.g., `invalid@example.com` / `bad-password`).
-- An inline error message should appear.
-- The browser must remain on `/login` after submitting.
-
-### 3. Pricing page
-- Navigate to `/pricing`.
-- A pricing card labeled “Pro” should be visible.
-- The “Start trial” button inside that card must be enabled/clickable.
-
-## Failure rules
-- Missing critical copy.
-- Navigation errors / unexpected redirects.
-- Disabled or missing CTA buttons.
-- Error banners or console text rendered in the UI.
-
-## Output expectations
-- Produce a short PASS/FAIL list for every scenario.
-- When a failure occurs, include the element/selector name and the active URL in the report.
+### Scenario 1: Login screen
+- Route: /auth/login
+- URL: https://zeda.video/auth/login
+- Goal: Load the auth login page, exercise primary controls (inputs, sign-in buttons, forgot password, Google, create account) and wait for UI responses.
+- Steps:
+  1. Start a fresh browser session (clear cookies/localStorage).
+  2. Navigate to the route URL.
+  3. Systematically interact with visible inputs using placeholder text.
+  4. Click each prominent button/CTA once; after every click, wait ~3s to observe the UI.
+  5. If a modal or secondary flow appears, interact once then return to the primary page.
+- Failure conditions:
+  - UI becomes unresponsive longer than the wait window.
+  - Navigation errors (blank pages, 404, crash screens).
+  - Required interactive controls are missing or disabled.
+  - Obvious error modals or crash overlays.

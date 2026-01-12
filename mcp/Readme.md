@@ -1,17 +1,19 @@
 # MCP Playwright assets
 
-This folder holds everything the GUI scout needs:
+This folder is the **template** copied into each target repo under `<repo>/vercel_codex_autofix/mcp` the first time the loop runs. Inside the runtime copy you’ll find:
 
 - `playwright.config.json` – headless Chromium config shared by every run (CI-friendly viewport/timeouts).
-- `gui-tests.md` – the intent spec written in natural language. This is the file you show to Codex or any MCP-aware agent so it understands which flows to exercise.
+- `gui-routes.json` – the only file you edit manually. List each route (and optional name/description) you want the MCP agent to explore.
+- `gui-tests.md` – auto-generated intent spec derived from `gui-routes.json`. The loop rewrites it before every MCP run, so do not edit manually.
+- `gui-plan.generated.json` – machine-readable summary of the scenarios, also regenerated automatically for other tooling.
 - `run-gui-check.sh` – a thin wrapper around `npx @playwright/mcp@latest` that executes the spec above, saves traces/videos to `logs/gui/`, and prints a concise PASS/FAIL summary.
 
 ## How it works
 
-1. The autofix loop (or you) invokes `bash mcp/run-gui-check.sh <deployment-url>`.
-2. The script launches the Playwright MCP tool. Under the hood, that package spins up Chromium and lets an MCP-enabled LLM drive it using the instructions from `gui-tests.md`.
-3. Playwright MCP emits text output, plus trace/video artifacts whenever it discovers a problem.
-4. The loop copies the textual report into `.autofix/gui_report.md` so Codex can reason about GUI failures just like it reasons about Vercel build logs.
+1. In your target repo, edit `vercel_codex_autofix/mcp/gui-routes.json` to list the routes you want to probe (just one line per route if you like).
+2. The autofix loop regenerates `gui-tests.md` and `gui-plan.generated.json` automatically before launching each MCP run.
+3. `bash vercel_codex_autofix/mcp/run-gui-check.sh <deployment-url>` starts the Playwright MCP tool, which reads the freshly-generated intent spec and drives the browser locally.
+4. Playwright MCP emits text output, plus trace/video artifacts whenever it discovers a problem; the loop copies the textual report into `vercel_codex_autofix/.autofix/gui_report.md` so Codex can fix the issue.
 
 > **Which LLM does this use?**  
 > Whatever LLM your MCP environment is configured for. The script itself doesn’t hardcode a model; it simply shells out to `@playwright/mcp`, which negotiates with your configured MCP/LLM stack.

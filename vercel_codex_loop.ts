@@ -2,6 +2,7 @@ import { spawn } from "child_process";
 import fs from "fs";
 import path from "path";
 import process from "process";
+import { fileURLToPath } from "url";
 import dotenv from "dotenv";
 import { Codex } from "@openai/codex-sdk";
 
@@ -38,6 +39,8 @@ function loadEnv() {
 }
 
 loadEnv();
+const SCRIPT_FILE = fileURLToPath(import.meta.url);
+const SCRIPT_DIR = path.dirname(SCRIPT_FILE);
 
 // =========================
 // CONFIGURATION
@@ -59,12 +62,19 @@ const PREFLIGHT_COMMANDS: string[][] = [
   // ["pnpm", "-C", "apps/web", "lint"],
   // ["pnpm", "-C", "apps/web", "test"],
 ];
-const AUTOFIX_DIR = path.join(REPO_PATH, ".autofix");
+const RUNTIME_ROOT = path.resolve(process.env.VERCEL_CODEX_RUNTIME || path.join(REPO_PATH, "vercel_codex_autofix"));
+const LOGS_ROOT = path.join(RUNTIME_ROOT, "logs");
+const MCP_RUNTIME_DIR = path.join(RUNTIME_ROOT, "mcp");
+const AUTOFIX_DIR = path.join(RUNTIME_ROOT, ".autofix");
 const STATE_PATH = path.join(AUTOFIX_DIR, "state.json");
 const RUN_MCP_GUI = (process.env.RUN_MCP_GUI || process.env.RUN_MCP_PLAYWRIGHT || "1") !== "0";
-const MCP_GUI_SCRIPT_PATH = path.resolve(process.env.MCP_GUI_SCRIPT || path.join(REPO_PATH, "mcp", "run-gui-check.sh"));
-const MCP_GUI_OUTPUT_DIR = path.resolve(process.env.MCP_GUI_LOG_DIR || path.join(REPO_PATH, "logs", "gui"));
+const MCP_GUI_SCRIPT_PATH = path.resolve(process.env.MCP_GUI_SCRIPT || path.join(MCP_RUNTIME_DIR, "run-gui-check.sh"));
+const MCP_GUI_OUTPUT_DIR = path.resolve(process.env.MCP_GUI_LOG_DIR || path.join(LOGS_ROOT, "gui"));
 const MCP_GUI_REPORT_PATH = path.join(AUTOFIX_DIR, "gui_report.md");
+const MCP_GUI_TESTS_PATH = path.resolve(process.env.MCP_GUI_TESTS || path.join(MCP_RUNTIME_DIR, "gui-tests.md"));
+const MCP_GUI_ROUTES_PATH = path.resolve(process.env.MCP_GUI_ROUTES || path.join(MCP_RUNTIME_DIR, "gui-routes.json"));
+const MCP_GUI_PLAN_PATH = path.resolve(process.env.MCP_GUI_PLAN || path.join(MCP_RUNTIME_DIR, "gui-plan.generated.json"));
+const TEMPLATE_MCP_DIR = path.join(SCRIPT_DIR, "mcp");
 const CODEX_RULES =
   "- Edit files as needed, but do NOT commit.\n" +
   "- Prefer minimal, targeted changes that address the specific issue.\n" +
@@ -124,6 +134,23 @@ type GuiCheckOutcome = {
   report: string;
   logPath: string;
   targetUrl: string;
+};
+type GuiRoutesConfig = {
+  baseUrl?: string;
+  defaultWaitMs?: number;
+  routes: Array<string | GuiRouteEntry>;
+};
+type GuiRouteEntry = {
+  path: string;
+  name?: string;
+  description?: string;
+  waitMs?: number;
+};
+type GuiRouteSpec = {
+  path: string;
+  name: string;
+  description?: string;
+  waitMs: number;
 };
 
 function run(
@@ -581,7 +608,167 @@ async function runPreflight(): Promise<{ ok: boolean; output: string }> {
   return { ok: true, output };
 }
 
-async function runMcpPlaywrightTests(): Promise<PlaywrightTestOutcome | null> {
+function ensureFileDir(filePath: string) {
+  const dir = path.dirname(filePath);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
+
+function copyIfMissing(src: string, dest: string) {
+  if (!fs.existsSync(src)) return;
+  if (fs.existsSync(dest)) return;
+  ensureFileDir(dest);
+  fs.copyFileSync(src, dest);
+  try {
+    const mode = fs.statSync(src).mode;
+    fs.chmodSync(dest, mode);
+  } catch {
+    // ignore chmod errors
+  }
+}
+
+function ensureRuntimeAssets() {
+  fs.mkdirSync(RUNTIME_ROOT, { recursive: true });
+  fs.mkdirSync(LOGS_ROOT, { recursive: true });
+  fs.mkdirSync(MCP_RUNTIME_DIR, { recursive: true });
+
+  if (fs.existsSync(TEMPLATE_MCP_DIR)) {
+    copyIfMissing(path.join(TEMPLATE_MCP_DIR, "playwright.config.json"), path.join(MCP_RUNTIME_DIR, "playwright.config.json"));
+    copyIfMissing(path.join(TEMPLATE_MCP_DIR, "run-gui-check.sh"), path.join(MCP_RUNTIME_DIR, "run-gui-check.sh"));
+    copyIfMissing(path.join(TEMPLATE_MCP_DIR, "gui-routes.json"), MCP_GUI_ROUTES_PATH);
+  }
+}
+
+function sanitizeBaseUrl(raw?: string): string {
+  if (!raw) return "http://localhost:3000";
+  const trimmed = raw.trim();
+  if (!trimmed) return "http://localhost:3000";
+  if (/^https?:\/\//i.test(trimmed)) return trimmed.replace(/\/$/, "");
+  return `https://${trimmed.replace(/^\/+/, "").replace(/\/$/, "")}`;
+}
+
+function resolveFullUrl(baseUrl: string, routePath: string): string {
+  try {
+    return new URL(routePath, baseUrl).toString();
+  } catch {
+    const normalizedBase = baseUrl.replace(/\/$/, "");
+    const normalizedPath = routePath.replace(/^\//, "");
+    return `${normalizedBase}/${normalizedPath}`;
+  }
+}
+
+function normalizeGuiRoute(entry: string | GuiRouteEntry, index: number, defaultWaitMs: number): GuiRouteSpec | null {
+  if (typeof entry === "string") {
+    const pathValue = entry.trim();
+    if (!pathValue) return null;
+    return {
+      path: pathValue,
+      name: `Route ${pathValue}`,
+      waitMs: defaultWaitMs,
+    };
+  }
+  if (!entry || typeof entry.path !== "string") return null;
+  const trimmedPath = entry.path.trim();
+  if (!trimmedPath) return null;
+  return {
+    path: trimmedPath,
+    name: entry.name?.trim() || `Route ${trimmedPath}`,
+    description: entry.description?.trim() || undefined,
+    waitMs: entry.waitMs ?? defaultWaitMs,
+  };
+}
+
+async function autoGenerateGuiSpecs(targetUrl?: string) {
+  if (!RUN_MCP_GUI) return;
+
+  if (!fs.existsSync(MCP_GUI_ROUTES_PATH)) {
+    const sample = {
+      baseUrl: targetUrl || PROD_URL || "https://your-app.vercel.app",
+      defaultWaitMs: 3000,
+      routes: ["/"],
+    };
+    ensureFileDir(MCP_GUI_ROUTES_PATH);
+    fs.writeFileSync(MCP_GUI_ROUTES_PATH, JSON.stringify(sample, null, 2), "utf-8");
+    console.log(`[info] Created sample GUI routes config at ${MCP_GUI_ROUTES_PATH}; customize it for your app.`);
+  }
+
+  let configRaw: GuiRoutesConfig | null = null;
+  try {
+    configRaw = JSON.parse(fs.readFileSync(MCP_GUI_ROUTES_PATH, "utf-8")) as GuiRoutesConfig;
+  } catch (err) {
+    console.warn(`[warn] Failed to parse ${MCP_GUI_ROUTES_PATH}:`, err);
+    return;
+  }
+
+  const routesInput = configRaw?.routes || [];
+  if (routesInput.length === 0) {
+    console.warn(`[warn] GUI routes config at ${MCP_GUI_ROUTES_PATH} has no routes; skipping spec generation.`);
+    return;
+  }
+
+  const defaultWaitMs = configRaw?.defaultWaitMs ?? 3000;
+  const normalizedRoutes = routesInput
+    .map((entry, idx) => normalizeGuiRoute(entry, idx, defaultWaitMs))
+    .filter((r): r is GuiRouteSpec => Boolean(r));
+
+  if (normalizedRoutes.length === 0) {
+    console.warn(`[warn] GUI routes config at ${MCP_GUI_ROUTES_PATH} did not yield any valid entries.`);
+    return;
+  }
+
+  const baseUrl = sanitizeBaseUrl(configRaw?.baseUrl || targetUrl || PROD_URL || "http://localhost:3000");
+  const generatedAt = new Date().toISOString();
+  const mdParts: string[] = [];
+  mdParts.push("# Auto-generated GUI intent spec for MCP Playwright");
+  mdParts.push("");
+  mdParts.push(`- Generated: ${generatedAt}`);
+  mdParts.push(`- Base URL: ${baseUrl}`);
+  mdParts.push(`- Routes file: ${path.relative(REPO_PATH, MCP_GUI_ROUTES_PATH)}`);
+  mdParts.push("");
+  mdParts.push("## Scenarios");
+  mdParts.push("");
+
+  const plan = {
+    generatedAt,
+    baseUrl,
+    defaultWaitMs,
+    scenarios: normalizedRoutes.map((route, index) => ({
+      index: index + 1,
+      name: route.name,
+      path: route.path,
+      url: resolveFullUrl(baseUrl, route.path),
+      waitMs: route.waitMs,
+      description: route.description,
+    })),
+  };
+
+  for (const [idx, route] of normalizedRoutes.entries()) {
+    const waitSeconds = (route.waitMs / 1000).toFixed(1).replace(/\.0$/, "");
+    mdParts.push(`### Scenario ${idx + 1}: ${route.name}`);
+    mdParts.push(`- Route: ${route.path}`);
+    mdParts.push(`- URL: ${resolveFullUrl(baseUrl, route.path)}`);
+    if (route.description) {
+      mdParts.push(`- Goal: ${route.description}`);
+    }
+    mdParts.push("- Steps:");
+    mdParts.push("  1. Start a fresh browser session (clear cookies/localStorage).");
+    mdParts.push("  2. Navigate to the route URL.");
+    mdParts.push("  3. Systematically interact with visible inputs using placeholder text.");
+    mdParts.push(`  4. Click each prominent button/CTA once; after every click, wait ~${waitSeconds}s to observe the UI.`);
+    mdParts.push("  5. If a modal or secondary flow appears, interact once then return to the primary page.");
+    mdParts.push("- Failure conditions:");
+    mdParts.push("  - UI becomes unresponsive longer than the wait window.");
+    mdParts.push("  - Navigation errors (blank pages, 404, crash screens).");
+    mdParts.push("  - Required interactive controls are missing or disabled.");
+    mdParts.push("  - Obvious error modals or crash overlays.");
+    mdParts.push("");
+  }
+
+  ensureFileDir(MCP_GUI_TESTS_PATH);
+  fs.writeFileSync(MCP_GUI_TESTS_PATH, mdParts.join("\n"), "utf-8");
+  ensureFileDir(MCP_GUI_PLAN_PATH);
+  fs.writeFileSync(MCP_GUI_PLAN_PATH, JSON.stringify(plan, null, 2), "utf-8");
+}
+
 async function runGuiCheck(targetUrl?: string): Promise<GuiCheckOutcome | null> {
   if (!RUN_MCP_GUI) {
     console.log("[info] RUN_MCP_GUI=0 — skipping GUI checks.");
@@ -593,6 +780,10 @@ async function runGuiCheck(targetUrl?: string): Promise<GuiCheckOutcome | null> 
     console.log("[info] No target URL available for GUI checks. Set PROD_URL or pass MCP_GUI_TARGET_URL.");
     return null;
   }
+
+  ensureRuntimeAssets();
+  await autoGenerateGuiSpecs(resolvedTarget);
+  fs.mkdirSync(MCP_GUI_OUTPUT_DIR, { recursive: true });
 
   if (!fs.existsSync(MCP_GUI_SCRIPT_PATH)) {
     console.log(`[info] GUI runner script not found at ${MCP_GUI_SCRIPT_PATH}. Skipping GUI checks.`);
@@ -636,6 +827,7 @@ function sleep(ms: number) {
 // =========================
 
 async function main() {
+  ensureRuntimeAssets();
   console.log("[start] Vercel ↔ Codex auto-fix loop (TypeScript)");
   console.log(`Repo:   ${REPO_PATH}`);
   const branch = await resolveGitBranch();
@@ -724,6 +916,7 @@ async function main() {
           "GUI regression detected by MCP Playwright after deployment.\n" +
           `Target URL: ${guiOutcome.targetUrl}\n` +
           `GUI report saved to ${guiOutcome.logPath}\n` +
+          `GUI plan: ${MCP_GUI_PLAN_PATH}\n` +
           `Artifacts directory: ${MCP_GUI_OUTPUT_DIR}\n` +
           "Analyze the report, inspect the trace/video in the logs directory, and patch the application so the scenario passes.";
       }
@@ -810,7 +1003,23 @@ async function main() {
   console.log(`[stop] Reached MAX_ITERATIONS=${MAX_ITERATIONS}. Exiting.`);
 }
 
-main().catch((err) => {
-  console.error("Fatal error:", err);
-  process.exit(1);
-});
+const DIRECT_INVOKE = (() => {
+  try {
+    if (!process.argv || !process.argv[1]) return false;
+    return path.resolve(process.argv[1]) === SCRIPT_FILE;
+  } catch {
+    return false;
+  }
+})();
+
+if (DIRECT_INVOKE) {
+  main().catch((err) => {
+    console.error("Fatal error:", err);
+    process.exit(1);
+  });
+}
+
+export async function regenerateGuiSpecs(targetUrl?: string) {
+  ensureRuntimeAssets();
+  await autoGenerateGuiSpecs(targetUrl);
+}

@@ -1,0 +1,15 @@
+{
+  "generatedAt": "(auto)",
+  "baseUrl": "https://zeda.video",
+  "defaultWaitMs": 3000,
+  "scenarios": [
+    {
+      "index": 1,
+      "name": "Login screen",
+      "path": "/auth/login",
+      "url": "https://zeda.video/auth/login",
+      "waitMs": 3000,
+      "description": "Load the auth login page, exercise primary controls (inputs, sign-in buttons, forgot password, Google, create account) and wait for UI responses."
+    }
+  ]
+}

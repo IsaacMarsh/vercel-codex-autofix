@@ -113,8 +113,12 @@ RUN_PREFLIGHT=0  # set to 1 to run local checks (tsc/lint/tests) before committi
 
 # --- MCP Playwright GUI checks ---
 RUN_MCP_GUI=1
-MCP_GUI_SCRIPT=mcp/run-gui-check.sh
-MCP_GUI_LOG_DIR=logs/gui
+MCP_GUI_SCRIPT=          # override runtime script path if needed
+MCP_GUI_LOG_DIR=         # override logs dir if needed
+MCP_GUI_ROUTES=          # override routes file if needed
+# Where runtime assets live (defaults to <REPO_PATH>/vercel_codex_autofix)
+VERCEL_CODEX_RUNTIME=
+# Routes live in <runtime>/mcp/gui-routes.json (auto-generates gui-tests.md)
 ```
 
 Note:
@@ -154,14 +158,14 @@ CODEX_USE_EXEC=1 npx ts-node ~/Documents/vercel-codex-autofix/vercel_codex_loop.
 	•	Passing an empty string (e.g., `""`, `''`, or whitespace) explicitly skips the initial-task phase if you want log-based repair only.
 
 Optional: trigger the MCP Playwright GUI scout manually
-	•	Run the helper script, which shells out to `npx @playwright/mcp` with the intent spec in `mcp/gui-tests.md`:
+	•	After the first run, all runtime assets land under `<your-repo>/vercel_codex_autofix/`. Run the helper script there (it shells out to `npx @playwright/mcp` using the auto-generated intent spec):
 
 ```
-bash mcp/run-gui-check.sh https://your-app.vercel.app
+bash vercel_codex_autofix/mcp/run-gui-check.sh https://your-app.vercel.app
 ```
 
-	•	Artifacts (trace/video/report) land in `logs/gui/` and `.autofix/gui_report.md`.
-	•	The loop automatically runs the same script after each successful deployment and feeds any FAIL sections straight into Codex.
+	•	Artifacts (trace/video/report) land in `vercel_codex_autofix/logs/gui/` and `vercel_codex_autofix/.autofix/gui_report.md`.
+	•	The loop automatically regenerates `vercel_codex_autofix/mcp/gui-tests.md` + `.../gui-plan.generated.json` from the routes listed in `vercel_codex_autofix/mcp/gui-routes.json`, then runs the same script after each successful deployment and feeds any FAIL sections straight into Codex.
 
 ⸻
 
@@ -181,7 +185,7 @@ vercel inspect <deployment> --logs --wait
 	•	git commit
 	•	git push origin <active-branch>
 	8.	Waits and repeats
-	9.	When Vercel declares the deployment successful, runs `mcp/run-gui-check.sh` (if enabled); GUI failures feed fresh logs back into Codex, passing runs stop the loop
+	9.	When Vercel declares the deployment successful, runs `vercel_codex_autofix/mcp/run-gui-check.sh` (if enabled); GUI failures feed fresh logs back into Codex, passing runs stop the loop
 
 ⸻
 
@@ -205,12 +209,11 @@ Iteration 1/10
 ⸻
 
 🧪 MCP Playwright GUI scout
-	•	After Vercel reports a successful build, the loop executes `mcp/run-gui-check.sh`, which shells out to `npx @playwright/mcp` with the instructions defined in `mcp/gui-tests.md`.
-	•	The script uses the config in `mcp/playwright.config.json` (headless Chromium, deterministic viewport) and stores traces/videos under `logs/gui/`.
-	•	The natural-language intent file is what Codex/MCP agents read; you don’t write Playwright test code—only intent.
-	•	The helper writes a summarized PASS/FAIL report to `.autofix/gui_report.md`; when it contains “FAIL”, that file becomes Codex’s new log source for the next autofix turn.
-	•	Set `RUN_MCP_GUI=0` to disable this stage, or override `MCP_GUI_SCRIPT` / `MCP_GUI_LOG_DIR` if you relocate the script.
-	•	Run the script manually at any time via `bash mcp/run-gui-check.sh https://your-app.vercel.app` to reproduce GUI regressions locally.
+	•	Declare the routes you care about in `<REPO>/vercel_codex_autofix/mcp/gui-routes.json` (just name + path + optional description); the loop regenerates `gui-tests.md` and `gui-plan.generated.json` automatically from that file before every MCP run. (Set `VERCEL_CODEX_RUNTIME` to change the base directory.)
+	•	After Vercel reports a successful build, the loop executes `vercel_codex_autofix/mcp/run-gui-check.sh`, which shells out to `npx @playwright/mcp` with the freshly generated intent spec and the config in `vercel_codex_autofix/mcp/playwright.config.json`.
+	•	The helper writes a summarized PASS/FAIL report to `vercel_codex_autofix/.autofix/gui_report.md`; when it contains “FAIL”, that file becomes Codex’s new log source for the next autofix turn, along with traces/videos saved in `vercel_codex_autofix/logs/gui/`.
+	•	Set `RUN_MCP_GUI=0` to disable this stage, or override `MCP_GUI_SCRIPT` / `MCP_GUI_LOG_DIR` / `MCP_GUI_ROUTES` / `VERCEL_CODEX_RUNTIME` if you relocate the assets.
+	•	Run the script manually at any time via `bash vercel_codex_autofix/mcp/run-gui-check.sh https://your-app.vercel.app` (after updating `vercel_codex_autofix/mcp/gui-routes.json`) to reproduce GUI regressions locally.
 
 ⸻
 
